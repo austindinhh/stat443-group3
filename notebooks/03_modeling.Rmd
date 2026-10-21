@@ -1,0 +1,423 @@
+---
+title: "Modeling"
+output: pdf_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7, fig.height = 3.5, fig.align = "center",
+                      fig.path = "../figures/models/")
+```
+
+```{r load}
+library(MASS)
+library(dplyr)
+library(ggplot2)
+library(faraway)
+library(lmtest)
+library(randomForest)
+
+theme_set(theme_minimal(base_size = 11) +
+            theme(plot.title    = element_text(hjust = 0.5),
+                  plot.subtitle = element_text(hjust = 0.5)))
+
+tech <- readRDS("../data/processed/tech_clean.rds")
+```
+
+\newpage
+
+# 1. Model Data
+
+## Overlapping Features
+
+```{r exact-overlap}
+# Exact overlaps: these add up to 1 for every article
+all(abs(tech$rate_positive_words + tech$rate_negative_words - 1) < 1e-9)
+all(abs(tech$LDA_00 + tech$LDA_01 + tech$LDA_02 + tech$LDA_03 + tech$LDA_04 - 1) < 1e-6)
+```
+
+* `rate_negative_words` is exactly 1 minus `rate_positive_words`
+* `LDA_04` is exactly 1 minus the other four topic scores
+* Keeping all of them would make the model unsolvable (exact collinearity)
+
+```{r near-overlap}
+overlap_pairs <- data.frame(
+  dropped = c("n_unique_tokens", "self_reference_min_shares", "self_reference_max_shares",
+              "kw_max_avg"),
+  kept    = c("n_non_stop_unique_tokens", "self_reference_avg_shares",
+              "self_reference_avg_shares", "kw_avg_avg")
+)
+
+overlap_pairs$correlation <- round(mapply(function(a, b) cor(tech[[a]], tech[[b]]),
+                                          overlap_pairs$dropped, overlap_pairs$kept), 2)
+knitr::kable(overlap_pairs, row.names = FALSE)
+```
+
+* Each dropped column has a correlation of 0.75 to 0.93 with the one we keep
+
+```{r vif-before}
+# VIF with every candidate count, rate and popularity feature
+candidates <- tech |>
+  select(n_tokens_content, num_hrefs, num_self_hrefs, n_unique_tokens,
+         n_non_stop_unique_tokens, global_sentiment_polarity,
+         global_rate_positive_words, global_rate_negative_words, rate_positive_words,
+         kw_min_min, kw_max_min, kw_avg_min, kw_min_max, kw_max_max, kw_avg_max,
+         kw_min_avg, kw_max_avg, kw_avg_avg, self_reference_min_shares,
+         self_reference_max_shares, self_reference_avg_shares)
+
+round(sort(vif(candidates), decreasing = TRUE)[1:6], 1)
+```
+
+```{r vif-after}
+kept <- tech |>
+  select(n_tokens_content, num_hrefs, num_self_hrefs, n_non_stop_unique_tokens,
+         global_sentiment_polarity, global_rate_positive_words,
+         global_rate_negative_words, kw_avg_avg, self_reference_avg_shares)
+
+round(sort(vif(kept), decreasing = TRUE), 1)
+```
+
+* Before dropping, five features have VIF above 10. The highest is
+  `self_reference_avg_shares` (28.6), because its min and max versions are also in
+* After dropping, every VIF is 2.3 or lower
+* The nine `kw_` columns are all summaries of keyword popularity, and the min
+  columns are full of `-1` and `0` placeholders. We keep only `kw_avg_avg`, the
+  average keyword's average shares, as one clear measure
+
+\newpage
+
+## Features Used
+
+```{r model-data}
+model_data <- tech |>
+  mutate(
+    log_words      = log1p(n_tokens_content),
+    log_hrefs      = log1p(num_hrefs),
+    log_self_hrefs = log1p(num_self_hrefs),
+    log_kw_avg_avg = log1p(kw_avg_avg),
+    log_self_ref   = log1p(self_reference_avg_shares),
+    quarter        = factor(quarter)
+  )
+
+controllable <- c("weekend", "vid_group", "img_group", "log_words", "n_tokens_title",
+                  "log_hrefs", "log_self_hrefs", "num_keywords", "average_token_length",
+                  "n_non_stop_unique_tokens", "global_sentiment_polarity",
+                  "global_subjectivity", "global_rate_positive_words",
+                  "global_rate_negative_words", "avg_positive_polarity",
+                  "avg_negative_polarity", "title_sentiment_polarity", "title_subjectivity")
+
+uncontrollable <- c("log_kw_avg_avg", "log_self_ref", "LDA_00", "LDA_01", "LDA_02", "LDA_03",
+             "quarter")
+
+features <- paste(c(controllable, uncontrollable), collapse = " + ")
+```
+
+* Controllable features: things an editor chooses (day, visuals, length, links,
+  wording, tone)
+* Uncontrollable features: things an editor can't directly change (topic popularity,
+  popularity of linked articles, topic, time period)
+* Skewed counts use `log(x + 1)`
+* `quarter` replaces `timedelta` to account for drift over time
+* Dropped for overlapping with a kept feature (see Overlapping Features above)
+
+\newpage
+
+# 2. Full Linear Model
+
+## Response Transformation
+
+```{r boxcox}
+g_raw <- lm(as.formula(paste("shares ~", features)), data = model_data)
+bc <- boxcox(g_raw, lambda = seq(-1, 1, by = 0.01))
+
+bc$x[which.max(bc$y)]
+range(bc$x[bc$y > max(bc$y) - qchisq(0.95, 1) / 2])
+```
+
+* Box-Cox picks $\lambda \approx -0.24$, far from 1, so raw shares need a transformation
+* We use log shares ($\lambda = 0$) instead. It's close to the best $\lambda$ and
+  each coefficient reads as a percent change in shares
+
+## Weekday vs Weekend
+
+```{r day-vs-weekend}
+g_full <- lm(as.formula(paste("log_shares ~", features)), data = model_data)
+g_day  <- update(g_full, . ~ . - weekend + weekday)
+
+anova_tab <- anova(g_full, g_day)
+rownames(anova_tab) <- c("Weekday vs weekend", "7 days")
+knitr::kable(anova_tab, digits = 3)
+```
+
+* $H_0$: the six extra day terms are 0 (weekday vs weekend is enough)
+* p = 0.12, so we fail to reject and keep weekday vs weekend
+
+## Collinearity
+
+```{r vif}
+round(sort(vif(g_full), decreasing = TRUE)[1:6], 2)
+```
+
+* All VIFs are under 10, so collinearity isn't a problem
+* The highest is article tone (6.07), since the positive and negative word rates
+  partly measure the same thing
+
+\newpage
+
+## Diagnostics
+
+```{r diagnostics, fig.height = 6}
+par(mfrow = c(2, 2))
+plot(g_full)
+par(mfrow = c(1, 1))
+```
+
+* Residuals vs Fitted: centered on 0 with no clear curve
+* Q-Q: heavy upper tail from a few viral articles
+* Scale-Location: close to flat
+* Residuals vs Leverage: no points past the Cook's distance lines
+
+```{r bp-test}
+bptest(g_full)
+```
+
+* $H_0$: constant error variance. p < 0.001, so we reject
+* With 7,325 articles, the test picks up small differences in spread
+* Coefficient estimates are still unbiased, but p-values may be a little too
+  small.
+
+\newpage
+
+## Unusual Points
+
+```{r leverage}
+n <- nrow(model_data)
+p <- length(coef(g_full))
+
+lev <- hatvalues(g_full)
+sum(lev > 2 * p / n)
+
+jack <- rstudent(g_full)
+sum(abs(jack) > abs(qt(0.05 / (2 * n), n - p - 1)))  # Bonferroni
+
+cook <- cooks.distance(g_full)
+max(cook)
+```
+
+```{r cooks, fig.height = 3.5}
+halfnorm(cook, 3, ylab = "Cook's distances")
+```
+
+* 147 articles have high leverage ($h_i > 2p/n$), 2% of the data
+* 5 articles are outliers after the Bonferroni correction, all viral articles
+  with far more shares than predicted
+* Largest Cook's distance is 0.011, far below 1, so no single article changes
+  the fit. We keep all articles
+
+\newpage
+
+# 3. Variable Selection
+
+```{r step}
+g_aic <- step(g_full, direction = "backward", trace = 0)
+g_bic <- step(g_full, direction = "backward", k = log(n), trace = 0)
+
+all_terms <- c(controllable, uncontrollable)
+
+data.frame(
+  feature = all_terms,
+  group   = ifelse(all_terms %in% controllable, "Controllable", "Uncontrollable"),
+  AIC     = ifelse(all_terms %in% attr(terms(g_aic), "term.labels"), "Kept", ""),
+  BIC     = ifelse(all_terms %in% attr(terms(g_bic), "term.labels"), "Kept", "")
+) |> knitr::kable(row.names = FALSE)
+```
+
+* Backward elimination, starting from the full model
+* AIC drops 7 features. BIC drops 14, since it penalizes extra terms more
+* Both keep weekend, videos, word count, links, links, article tone,
+  subjectivity, headline tone, keyword popularity, linked-article popularity
+  and quarter
+* BIC also drops images, title length, number of keywords, word variety, the
+  other sentiment measures and the topic scores
+
+```{r model-compare}
+data.frame(
+  model    = c("Full", "AIC", "BIC"),
+  terms    = c(length(coef(g_full)), length(coef(g_aic)), length(coef(g_bic))) - 1,
+  adj_r2   = round(c(summary(g_full)$adj.r.squared, summary(g_aic)$adj.r.squared,
+                     summary(g_bic)$adj.r.squared), 4),
+  AIC      = round(c(AIC(g_full), AIC(g_aic), AIC(g_bic))),
+  BIC      = round(c(BIC(g_full), BIC(g_aic), BIC(g_bic)))
+) |> knitr::kable(row.names = FALSE)
+```
+
+* Adjusted $R^2$ barely changes (0.085 to 0.083), so the dropped features add
+  almost nothing
+* We use the BIC model as the final model since it's the simplest
+
+## Final Model
+
+```{r final}
+knitr::kable(summary(g_bic)$coefficients, digits = 4)
+summary(g_bic)$r.squared
+```
+
+* Every remaining term is significant at 0.01
+* The final model explains about 8.5% of the variation in log shares
+
+\newpage
+
+# 4. Random Forest
+
+```{r rf}
+set.seed(443)
+train_rows <- sample(n, round(0.8 * n))
+train <- model_data[train_rows, ]
+test  <- model_data[-train_rows, ]
+
+rf <- randomForest(as.formula(paste("log_shares ~", features)),
+                   data = train, ntree = 300, importance = TRUE)
+
+lm_full_train <- update(g_full, data = train)
+lm_bic_train  <- update(g_bic, data = train)
+```
+
+* The forest uses every feature, since it doesn't need variable selection
+
+## Accuracy on Test Articles
+
+```{r accuracy}
+test_r2 <- function(pred) {
+  1 - sum((test$log_shares - pred)^2) / sum((test$log_shares - mean(test$log_shares))^2)
+}
+
+data.frame(
+  model   = c("Full linear", "BIC linear", "Random forest"),
+  test_r2 = round(c(test_r2(predict(lm_full_train, test)),
+                    test_r2(predict(lm_bic_train, test)),
+                    test_r2(predict(rf, test))), 3)
+) |> knitr::kable(row.names = FALSE)
+```
+
+* The forest explains more on new articles (about 14% vs 8%), since it picks
+  up curves and combinations of features
+* The BIC model does as well as the full model with far fewer terms
+
+\newpage
+
+# 5. What Drives Shares
+
+```{r importance-data}
+ranking <- data.frame(feature = rownames(importance(rf)),
+                      importance = importance(rf)[, "%IncMSE"]) |>
+  mutate(group = ifelse(feature %in% controllable, "Controllable", "Uncontrollable"))
+```
+
+* Importance = how much worse the forest's predictions get when a feature's
+  values are shuffled
+
+```{r importance-all, fig.height = 5}
+ggplot(ranking, aes(importance, reorder(feature, importance))) +
+  geom_col(fill = "grey45") +
+  labs(x = "Increase in error when shuffled (%)", y = NULL,
+       title = "Most important features for predicting shares")
+```
+
+* Keyword popularity, word count, weekend and links rank highest
+
+```{r importance-controllable, fig.height = 4}
+ranking |>
+  filter(group == "Controllable") |>
+  ggplot(aes(importance, reorder(feature, importance))) +
+  geom_col(fill = "steelblue") +
+  labs(x = "Increase in error when shuffled (%)", y = NULL,
+       title = "Most important features an author controls")
+```
+
+* Word count, weekend and links rank highest among controllable features
+* Videos rank lower than their effect suggests because 72% of articles have
+  none, so shuffling them changes few predictions
+
+```{r importance-combined, fig.height = 5}
+ggplot(ranking, aes(importance, reorder(feature, importance), fill = group)) +
+  geom_col() +
+  scale_fill_manual(values = c(Controllable = "steelblue", Uncontrollable = "grey65"),
+                    name = NULL) +
+  labs(x = "Increase in error when shuffled (%)", y = NULL,
+       title = "Feature importance by group") +
+  theme(legend.position = "top")
+```
+
+* Forest importance and BIC selection mostly agree. The main exception is word
+  variety (`n_non_stop_unique_tokens`), which ranks high in the forest but is
+  dropped by BIC, likely because its effect isn't a straight line
+
+\newpage
+
+# 6. Interpretation
+
+* Effects come from the final (BIC) model, holding every other feature fixed
+* Since the response is log shares, a coefficient $\hat\beta$ means shares change
+  by $100(e^{\hat\beta} - 1)\%$ for a one-unit increase
+* For log features, doubling the count changes shares by $100(2^{\hat\beta} - 1)\%$
+* For scores from 0 to 1, we use a 0.1 increase: $100(e^{0.1\hat\beta} - 1)\%$
+
+```{r effects}
+b <- coef(g_bic)
+
+effects <- data.frame(
+  change = c("Weekend instead of weekday", "1 video instead of none",
+             "2+ videos instead of none", "Double the word count",
+             "Double the links", "Double the links to other articles",
+             "Article tone +0.1 (more positive)", "Subjectivity +0.1 (more opinion)",
+             "Headline tone +0.1 (more positive)",
+             "Double keyword popularity", "Double linked-article popularity"),
+  group = c(rep("Controllable", 9), rep("Uncontrollable", 2)),
+  pct_change = c(exp(b["weekendWeekend"]) - 1,
+                 exp(b["vid_group1"]) - 1,
+                 exp(b["vid_group2+"]) - 1,
+                 2^b["log_words"] - 1,
+                 2^b["log_hrefs"] - 1,
+                 2^b["log_self_hrefs"] - 1,
+                 exp(0.1 * b["global_sentiment_polarity"]) - 1,
+                 exp(0.1 * b["global_subjectivity"]) - 1,
+                 exp(0.1 * b["title_sentiment_polarity"]) - 1,
+                 2^b["log_kw_avg_avg"] - 1,
+                 2^b["log_self_ref"] - 1)
+) |>
+  mutate(pct_change = round(100 * pct_change, 1))
+
+knitr::kable(effects, row.names = FALSE)
+```
+
+```{r effects-chart, fig.height = 4}
+effects |>
+  filter(group == "Controllable") |>
+  ggplot(aes(pct_change, reorder(change, pct_change))) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = paste0(pct_change, "%"),
+                hjust = ifelse(pct_change > 0, -0.15, 1.15)), size = 3) +
+  scale_x_continuous(expand = expansion(mult = 0.25)) +
+  labs(x = "Change in shares (%)", y = NULL,
+       title = "Weekend posting and videos move shares the most")
+```
+
+* Posting on a weekend instead of a weekday: about 34% more shares
+* One video: about 17% more shares. Two or more: about 30% more
+* Doubling the word count: about 7% more. Doubling the links: about 8% more
+* Doubling links to other articles: about 11% fewer
+* A more positive article: slightly fewer shares. A more opinionated article or
+  a more positive headline: slightly more
+* Images aren't in the final model, so they don't affect shares once the other
+  features are accounted for
+
+## URL Date Check
+
+```{r url-check}
+g_url <- update(g_bic, . ~ . - weekend + url_is_weekend)
+round(100 * (exp(coef(g_url)["url_is_weekend"]) - 1), 1)
+```
+
+* About a quarter of articles have a different weekday in the URL than in the data
+* Using the URL date, the weekend effect is about 26% instead of 34%
+* Smaller, but still the largest controllable effect
