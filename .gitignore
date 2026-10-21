@@ -1,0 +1,15 @@
+# R and RStudio
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Other
+*.log
+*.aux
+*.tex
+*_files/
+*_cache/
+
+# Mac
+.DS_Store
