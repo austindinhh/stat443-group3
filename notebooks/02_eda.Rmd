@@ -89,7 +89,7 @@ ggplot(tech, aes(x = shares)) +
   scale_fill_manual(values = c(`FALSE` = "#5D8AA8", `TRUE` = "#C0392B"),
                     labels = c("Bottom 90%", "Top 10% most shared"),
                     name = NULL) +
-  labs(title = "How many times are Mashable tech articles shared?",
+  labs(title = "How many times are tech articles shared?",
        subtitle = paste0(comma_fmt(nrow(tech)),
                          " tech articles after cleaning (x-axis on log scale)"),
        x = "Number of shares (log scale)", y = "Number of articles") +
