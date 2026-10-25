@@ -1,0 +1,114 @@
+---
+title: "Mid-Project Progress Report"
+author: "Bisola Adeleke, Austin Dinh, Yunsu Han, Qi Yao"
+output: pdf_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+# Summary
+
+This report summarizes our progress on what drives social media shares for tech articles.
+
+Publishing day and video stand out as the most important factors so far. Weekend articles get about a third more shares than weekday articles, and adding a video brings roughly 15 to 30% more. Longer articles and articles with more links do slightly better, while the number of images and the tone of the writing make little difference.
+
+Together, these factors explain only a small part of why some articles are shared far more than others, so they can help a typical article do better but cannot predict which ones will go viral.
+
+\newpage
+
+# Data
+
+The data covers about 40,000 articles the site published between January 2013 and January 2015. We removed about 1,200 articles that had no text or impossible values, which left about 7,300 tech articles for the analysis.
+
+Shares vary enormously from one article to the next. The typical tech article gets about 1,700 shares and the top 10% get 6,000 or more, while the most shared article passed 660,000. A handful of articles like that would pull an average far upward, so we compare groups by their median instead.
+
+![](../figures/eda/shares-dist-1.pdf){width=80%}
+
+# Publishing Day
+
+![](../figures/eda/day-median-1.pdf){width=80%}
+
+Monday through Thursday look nearly identical, with a median of about 1,600 shares, and Friday is a little higher. Weekend articles reach 2,300 to 2,400, and the whole distribution shifts upward on those days, so ordinary articles gain along with the most popular ones. Even so, only about one in eight tech articles goes up on a weekend. Looking at each day separately showed nothing more than a simple weekday and weekend comparison. We found no seasonal pattern, and older articles have not gathered more shares over time than newer ones.
+
+\newpage
+
+# Images and Videos
+
+![](../figures/eda/images-1.pdf){width=90%}
+
+![](../figures/eda/videos-1.pdf){width=90%}
+
+Most tech articles use few visuals, with about 60% having zero or one image and over 70% having no video. Articles with videos get noticeably more shares. Articles with more images also seem to do a bit better at first glance, but that gap goes away once we account for length, links and publishing day.
+
+\newpage
+
+# Length and Links
+
+![](../figures/eda/length-1.pdf){width=90%}
+
+![](../figures/eda/links-1.pdf){width=90%}
+
+Longer articles and articles with more links both tend to get more shares. Where the links point makes a difference, however, since articles with many links back to the site's own earlier stories tend to get fewer shares.
+
+\newpage
+
+# Tone
+
+![](../figures/eda/article-tone-1.pdf){width=75%}
+
+Most tech articles lean slightly positive, and more than half of the headlines contain no emotional words at all. Strongly positive articles and negative headlines do a little worse, while articles with more opinion do a little better. From one end of the scale to the other, these differences amount to about 200 shares, which is too small to plan around.
+
+# Initial Modeling
+
+Looking at one feature at a time can be misleading, since articles with videos may also be longer or more likely to run on a weekend. To separate these effects, we fit models that consider all of an article's features at once.
+
+Our main model is a linear regression, which we chose because its results translate directly into statements such as "weekend articles get about a third more shares." It also accounts for each article's topic and how popular its keywords have been in the past, so those are not mistaken for the effect of something like publishing day. We kept only the features that made a clear difference, leaving a short list that is easy to explain.
+
+We also tried a random forest, a more flexible model that can catch more complicated patterns but is much harder to explain. It pointed to the same features as most important, led by keyword popularity, length, weekend publishing and links.
+
+| Model | Strength | Predicting exact shares |
+|:------------------|:-------------------------------|:----------------------|
+| Linear regression | Easy to explain | Weak |
+| Random forest | Catches more complex patterns | Weak, but somewhat better |
+
+Neither model can reliably predict how many shares a given article will get, since most of the difference between articles comes from things the data does not record, such as the news itself or the time of day an article went up. What the models do show is which factors matter and roughly how much each one moves shares for a typical article, which is what the questions of interest call for.
+
+\newpage
+
+# What the Models Show
+
+![](../figures/models/importance-plain-1.pdf){width=80%}
+
+In this chart from the random forest, longer bars mean a factor matters more for predicting shares. Blue bars are things the site can choose, and grey bars describe the topic or time period.
+
+![](../figures/models/effects-chart-1.pdf){width=80%}
+
+This chart shows the linear regression's estimate for each feature within the site's control. Weekend publishing and video are well ahead of everything else, while a very positive tone and many links to the site's own stories go along with slightly fewer shares.
+
+\newpage
+
+# Open Issues
+
+- For about one in five tech articles, the weekday in the data falls one to five days after the date in the article's web address.
+- Weekend articles may be different kinds of stories or face less competition, and the current data cannot separate that from a true weekend effect.
+- Past keyword popularity is one of the best signs of how an article will do, but it is not something the site can easily change.
+
+# Questions for Discussion
+
+1. Is there any record of how the publishing day was captured, and should the date in the web address be treated as correct instead?
+2. The data only records the day each article was published. Are posting times available, so we can also look at time of day?
+3. We plan to report each finding as a percentage change in shares for a typical article, along with a plain-language range. Would that format be useful?
+    - For example, "Weekend articles get roughly 25 to 35% more shares than weekday articles."
+4. As a possible follow-up, we could compare tech with business and entertainment articles to see whether the same factors matter outside tech. Would that comparison be worthwhile?
+5. Are there other features believed to matter, such as author, headline style or holidays, that are not in this data?
+
+# Next Steps
+
+Since an interpretable model was named as the priority at the initial meeting, our final results will rely on the linear regression. Before the final presentation, we plan to do the following.
+
+- Refit the models with the agreed publishing date once the date question is settled, and update the weekend estimate.
+- Test whether features work differently together, such as whether video or images help more on weekends than on weekdays.
+- Check for diminishing returns in length and links, to see whether the gains level off past a certain point, such as 1,000 words.
+- Add new variables from the existing data, such as holidays based on the publishing date and company or product names (for example, Apple or Google) taken from the web address, which would give clearer topic labels than the current unlabeled groups.
