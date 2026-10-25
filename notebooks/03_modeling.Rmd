@@ -348,6 +348,43 @@ ggplot(ranking, aes(importance, reorder(feature, importance), fill = group)) +
   theme(legend.position = "top")
 ```
 
+
+```{r importance-plain, fig.height = 3.8, include=FALSE}
+# Plain-language version of the importance chart for the progress report
+plain <- c(
+  log_kw_avg_avg = "Past popularity of keywords", log_words = "Word count",
+  weekend = "Weekend vs weekday", log_hrefs = "Number of links",
+  n_non_stop_unique_tokens = "Variety of words used",
+  log_self_ref = "Popularity of linked site articles",
+  log_self_hrefs = "Links to the site's own articles",
+  global_sentiment_polarity = "Overall tone", quarter = "Time period",
+  global_rate_positive_words = "Share of positive words", img_group = "Number of images",
+  global_rate_negative_words = "Share of negative words", LDA_03 = "Topic group 4",
+  num_keywords = "Number of keywords", vid_group = "Number of videos",
+  LDA_01 = "Topic group 2", avg_negative_polarity = "Strength of negative words",
+  avg_positive_polarity = "Strength of positive words",
+  title_sentiment_polarity = "Headline tone", LDA_00 = "Topic group 1",
+  global_subjectivity = "Amount of opinion", LDA_02 = "Topic group 3",
+  average_token_length = "Average word length", title_subjectivity = "Headline opinion",
+  n_tokens_title = "Headline length")
+
+data.frame(feature = rownames(importance(rf)),
+           importance = importance(rf)[, "%IncMSE"]) |>
+  mutate(group = ifelse(feature %in% controllable, "Within the site's control",
+                        "Topic and timing"),
+         label = plain[feature]) |>
+  arrange(desc(importance)) |>
+  head(10) |>
+  ggplot(aes(importance, reorder(label, importance), fill = group)) +
+  geom_col() +
+  scale_fill_manual(values = c(`Within the site's control` = "steelblue",
+                               `Topic and timing` = "grey65"), name = NULL) +
+  labs(x = "How much worse predictions get without this factor (%)", y = NULL,
+       title = "Keyword popularity, length and weekend timing matter most",
+       subtitle = "Top 10 factors in the random forest") +
+  theme(legend.position = "top")
+```
+
 * Forest importance and BIC selection mostly agree. The main exception is word
   variety (`n_non_stop_unique_tokens`), which ranks high in the forest but is
   dropped by BIC, likely because its effect isn't a straight line
